@@ -1,5 +1,3 @@
-"""A small, self-contained Tetris game built with Python's standard library."""
-
 from __future__ import annotations
 
 import random
@@ -54,6 +52,10 @@ class Tetris:
         self._label("LEVEL")
         self.level_text = self._value("1")
 
+        self._label("HOLD (C)")
+        self.hold_preview = tk.Canvas(self.side, width=150, height=90, bg=PANEL,
+                                      highlightthickness=0)
+        self.hold_preview.pack(anchor="w", pady=(0, 8))
         self._label("NEXT")
         self.preview = tk.Canvas(self.side, width=150, height=110, bg=PANEL,
                                  highlightthickness=0)
@@ -66,7 +68,7 @@ class Tetris:
                   activebackground="#5b6cf2", activeforeground="white",
                   relief="flat", padx=12, pady=7, cursor="hand2").pack(anchor="w", pady=(0, 14))
         self._label("CONTROLS")
-        for line in ("← →   Move", "↑       Rotate", "↓       Soft drop", "Space  Hard drop", "P       Pause", "R       Restart"):
+        for line in ("← →   Move", "↑       Rotate", "↓       Soft drop", "Space  Hard drop", "C       Hold", "P       Pause", "R       Restart"):
             tk.Label(self.side, text=line, font=("Segoe UI", 10), bg=BG,
                      fg=MUTED, anchor="w").pack(anchor="w", pady=2)
 
@@ -75,6 +77,8 @@ class Tetris:
         self.root.bind("<Down>", lambda _e: self.soft_drop())
         self.root.bind("<Up>", lambda _e: self.rotate())
         self.root.bind("<space>", lambda _e: self.hard_drop())
+        self.root.bind("c", lambda _e: self.hold_piece())
+        self.root.bind("C", lambda _e: self.hold_piece())
         self.root.bind("p", lambda _e: self.toggle_pause())
         self.root.bind("P", lambda _e: self.toggle_pause())
         self.root.bind("r", lambda _e: self.new_game())
@@ -96,6 +100,8 @@ class Tetris:
         self.board: list[list[str | None]] = [[None for _ in range(COLS)] for _ in range(ROWS)]
         self.score = self.lines = 0
         self.paused = self.over = False
+        self.held_piece: str | None = None
+        self.hold_used = False
         self.bag: list[str] = []
         self.current = self._take_piece()
         self.next_piece = self._take_piece()
@@ -141,14 +147,20 @@ class Tetris:
     def rotate(self) -> None:
         if self.paused or self.over:
             return
+        # A square is unchanged by rotation; skipping it prevents its 2x2
+        # cells from shifting inside the larger rotation grid.
+        if self.current["name"] == "O":
+            return
         cells = self.current["cells"]
         rotated = [(3 - y, x) for x, y in cells]
         x, y = int(self.current["x"]), int(self.current["y"])
-        for kick in (0, -1, 1, -2, 2):
-            if self._valid(rotated, x + kick, y):
-                self.current["cells"] = rotated
-                self.current["x"] = x + kick
-                break
+        # Keep the anchor fixed except for the minimum shift needed at a wall.
+        min_x = min(dx for dx, _ in rotated)
+        max_x = max(dx for dx, _ in rotated)
+        x = max(-min_x, min(x, COLS - 1 - max_x))
+        if self._valid(rotated, x, y):
+            self.current["cells"] = rotated
+            self.current["x"] = x
         self.draw()
 
     def soft_drop(self) -> None:
@@ -166,6 +178,26 @@ class Tetris:
             distance += 1
         self.score += distance * 2
         self.lock_piece()
+
+    def hold_piece(self) -> None:
+        if self.paused or self.over or self.hold_used:
+            return
+        current_name = str(self.current["name"])
+        if self.held_piece is None:
+            self.held_piece = current_name
+            self.current = self.next_piece
+            self.next_piece = self._take_piece()
+        else:
+            held_name = self.held_piece
+            self.held_piece = current_name
+            self.current = {"name": held_name, "cells": list(SHAPES[held_name][1]),
+                            "x": 3, "y": 0}
+        self.current["x"], self.current["y"] = 3, 0
+        self.hold_used = True
+        if not self._valid(self.current["cells"], 3, 0):
+            self.over = True
+            self.status.config(text="GAME OVER")
+        self.draw()
 
     def lock_piece(self) -> None:
         name = str(self.current["name"])
@@ -188,6 +220,7 @@ class Tetris:
             self.score += SCORES[count] * self.level
         self.current = self.next_piece
         self.next_piece = self._take_piece()
+        self.hold_used = False
         self.current["x"], self.current["y"] = 3, 0
         self._refresh_stats()
         if not self._valid(self.current["cells"], 3, 0):
@@ -217,6 +250,13 @@ class Tetris:
         if not self.over:
             name = str(self.current["name"])
             color = SHAPES[name][0]
+            ghost_y = int(self.current["y"])
+            while self._valid(self.current["cells"], int(self.current["x"]), ghost_y + 1):
+                ghost_y += 1
+            for dx, dy in self.current["cells"]:
+                x, y = int(self.current["x"]) + dx, ghost_y + dy
+                if y >= 0:
+                    self._draw_cell(c, x, y, color, color, stipple="gray50")
             for dx, dy in self.current["cells"]:
                 x, y = int(self.current["x"]) + dx, int(self.current["y"]) + dy
                 if y >= 0:
@@ -227,26 +267,36 @@ class Tetris:
             c.create_text(BOARD_W // 2, BOARD_H // 2, text="PAUSED" if self.paused else "GAME OVER",
                           fill=TEXT, font=("Segoe UI", 20, "bold"))
         self._draw_preview()
+        self._draw_hold_preview()
 
     @staticmethod
-    def _draw_cell(canvas: tk.Canvas, x: int, y: int, color: str, outline: str) -> None:
+    def _draw_cell(canvas: tk.Canvas, x: int, y: int, color: str, outline: str,
+                   stipple: str = "") -> None:
         pad = 2
         canvas.create_rectangle(x * CELL + pad, y * CELL + pad,
                                 (x + 1) * CELL - pad, (y + 1) * CELL - pad,
-                                fill=color, outline=outline, width=1)
+                                fill=color, outline=outline, width=1, stipple=stipple)
 
     def _draw_preview(self) -> None:
-        c = self.preview
+        self._draw_piece_preview(self.preview, str(self.next_piece["name"]), 150, 110)
+
+    def _draw_hold_preview(self) -> None:
+        self.hold_preview.delete("all")
+        if self.held_piece is not None:
+            self._draw_piece_preview(self.hold_preview, self.held_piece, 150, 90)
+
+    @staticmethod
+    def _draw_piece_preview(canvas: tk.Canvas, name: str, width: int, height: int) -> None:
+        c = canvas
         c.delete("all")
-        name = str(self.next_piece["name"])
         color, cells = SHAPES[name]
         min_x = min(x for x, _ in cells)
         max_x = max(x for x, _ in cells)
         min_y = min(y for _, y in cells)
         max_y = max(y for _, y in cells)
         size = 24
-        start_x = (150 - (max_x - min_x + 1) * size) // 2
-        start_y = (110 - (max_y - min_y + 1) * size) // 2
+        start_x = (width - (max_x - min_x + 1) * size) // 2
+        start_y = (height - (max_y - min_y + 1) * size) // 2
         for x, y in cells:
             c.create_rectangle(start_x + (x - min_x) * size + 2,
                                start_y + (y - min_y) * size + 2,
